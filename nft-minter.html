@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BlockBase NFT Minter</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: system-ui, sans-serif; background: #0f0f0f; color: #ddd;
+               max-width: 680px; margin: 0 auto; padding: 2rem 1rem; }
+        h1   { font-size: 1.4rem; margin-bottom: 0.25rem; }
+        .sub { color: #666; font-size: 0.85rem; margin-bottom: 2rem; }
+        .card    { background: #161616; border: 1px solid #2a2a2a;
+                   border-radius: 10px; padding: 1.4rem; margin: 1rem 0; }
+        .card h2 { margin: 0 0 1rem; font-size: 1rem; color: #eee; }
+        button   { background: #7c3aed; color: #fff; border: none; border-radius: 6px;
+                   padding: 0.55rem 1.2rem; cursor: pointer; font-size: 0.85rem;
+                   margin-top: 0.5rem; }
+        button:disabled { background: #222; color: #555; cursor: not-allowed; }
+        input    { width: 100%; padding: 0.5rem 0.75rem; background: #111;
+                   border: 1px solid #333; border-radius: 6px; color: #ddd;
+                   font-size: 0.85rem; margin-top: 0.5rem; margin-bottom: 0.5rem; }
+        .nft-grid  { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr));
+                     gap: 0.75rem; margin-top: 1rem; }
+        .nft-card  { background: #0d0d0d; border: 1px solid #2a2a2a;
+                     border-radius: 8px; padding: 1rem; text-align: center; }
+        .nft-id    { font-size: 2rem; margin-bottom: 0.25rem; }
+        .nft-name  { font-size: 0.8rem; font-weight: 600; color: #eee;
+                     word-break: break-word; }
+        .nft-date  { font-size: 0.7rem; color: #555; margin-top: 0.25rem; }
+        #status    { font-size: 0.82rem; color: #888; margin-top: 0.75rem;
+                     min-height: 1.2em; }
+        #status.err { color: #f87171; }
+        #status.ok  { color: #4ade80; }
+        .addr  { font-size: 0.75rem; font-family: monospace; color: #555;
+                 word-break: break-all; }
+        .stats { display: flex; gap: 2rem; flex-wrap: wrap; margin-top: 0.5rem; }
+        .stats span  { font-size: 0.8rem; color: #666; }
+        .stats strong { color: #ddd; }
+    </style>
+</head>
+<body>
+    <h1>BlockBase NFT Minter</h1>
+    <p class="sub">Mint a uniquely named NFT on the Sepolia testnet.</p>
+
+    <div class="card">
+        <h2>Wallet</h2>
+        <button id="connectBtn" onclick="connectWallet()">Connect MetaMask</button>
+        <p class="addr" id="walletAddr">Not connected</p>
+        <div class="stats">
+            <span>Total minted: <strong id="totalSupply">&mdash;</strong></span>
+            <span>Remaining Supply: <strong id="remainingSupply">&mdash;</strong></span>
+            <span>Mint price: <strong id="mintPrice">&mdash;</strong></span>
+        </div>
+    </div>
+
+    <div class="card" id="ownerCard" style="display:none;">
+        <h2>Owner Settings</h2>
+        <button onclick="withdrawFunds()">Withdraw Contract Balance</button>
+    </div>
+
+    <div class="card">
+        <h2>Mint an NFT</h2>
+        <input type="text" id="nftName"
+               placeholder="Give your NFT a name (max 64 chars)" maxlength="64" />
+        <button onclick="mintNFT()">Mint NFT</button>
+        <p id="status"></p>
+    </div>
+
+    <div class="card">
+        <h2>Transfer an NFT</h2>
+        <input type="text" id="transferTo" placeholder="Recipient Address (0x...)" />
+        <input type="number" id="transferId" placeholder="Token ID" />
+        <button onclick="transferNFT()">Transfer NFT</button>
+    </div>
+
+    <div class="card">
+        <h2>Your Collection</h2>
+        <div class="nft-grid" id="gallery">
+            <p style="color:#555;font-size:0.85rem;grid-column:1/-1">
+                Connect your wallet to see your NFTs.
+            </p>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Recent Activity (Global Activity Feed)</h2>
+        <div class="nft-grid" id="globalFeed">
+            <p style="color:#555;font-size:0.85rem;grid-column:1/-1">No global activity cached.</p>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+    <script>
+        const CONTRACT_ADDRESS = "0x6a491A5417903a3569b15D8902fBd2A4088b7B71";
+
+        const ABI = [
+            "function nextTokenId() view returns (uint256)",
+            "function mintPrice() view returns (uint256)",
+            "function mint(string name) payable",
+            "function getOwnedTokens(address owner) view returns (uint256[])",
+            "function getTokenData(uint256 tokenId) view returns (string name, address tokenOwner, uint256 mintedAt)",
+            "function owner() view returns (address)",
+            "function withdraw() external",
+            "function transferFrom(address from, address to, uint256 tokenId) external",
+            "event Minted(address indexed to, uint256 indexed tokenId, string name)"
+        ];
+
+        let provider, signer, contract, userAddress;
+
+        async function connectWallet() {
+            if (!window.ethereum) { setStatus("MetaMask not found.", "err"); return; }
+            provider = new ethers.providers.Web3Provider(window.ethereum);
+            await provider.send("eth_requestAccounts", []);
+            const network = await provider.getNetwork();
+            if (network.chainId !== 11155111) {
+                setStatus("Switch MetaMask to Sepolia.", "err"); return;
+            }
+            signer      = provider.getSigner();
+            userAddress = await signer.getAddress();
+            contract    = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+
+            document.getElementById("connectBtn").textContent = "Connected";
+            document.getElementById("connectBtn").disabled    = true;
+            document.getElementById("walletAddr").textContent = userAddress;
+
+            await loadData();
+
+            try {
+                const contractOwner = await contract.owner();
+                if (userAddress.toLowerCase() === contractOwner.toLowerCase()) {
+                    document.getElementById("ownerCard").style.display = "block";
+                }
+            } catch(e) { console.error("Owner parsing fault:", e); }
+
+            contract.on("Minted", async () => await loadData());
+        }
+
+        async function loadData() {
+            const [supply, price] = await Promise.all([
+                contract.nextTokenId(),
+                contract.mintPrice()
+            ]);
+            
+            const maxSupply = 50;
+            const remaining = maxSupply - supply.toNumber();
+
+            document.getElementById("totalSupply").textContent = supply.toString();
+            document.getElementById("remainingSupply").textContent = remaining.toString();
+            document.getElementById("mintPrice").textContent = ethers.utils.formatEther(price) + " ETH";
+            
+            await loadGallery();
+            await loadGlobalFeed();
+        }
+
+        async function loadGallery() {
+            const tokenIds = await contract.getOwnedTokens(userAddress);
+            const gallery  = document.getElementById("gallery");
+            if (tokenIds.length === 0) {
+                gallery.innerHTML = "<p style='color:#555;font-size:0.85rem;grid-column:1/-1'>You haven't minted any NFTs yet.</p>";
+                return;
+            }
+            const details = await Promise.all(tokenIds.map(id => contract.getTokenData(id)));
+            gallery.innerHTML = tokenIds.map((id, i) => {
+                const date = new Date(details[i].mintedAt.toNumber() * 1000).toLocaleDateString();
+                return (
+                    `<div class="nft-card">` +
+                    `  <div class="nft-id">#${id}</div>` +
+                    `  <div class="nft-name">${details[i].name}</div>` +
+                    `  <div class="nft-date">${date}</div>` +
+                    `</div>`
+                );
+            }).join("");
+        }
+
+        async function loadGlobalFeed() {
+            const feedElement = document.getElementById("globalFeed");
+            try {
+                const filter = contract.filters.Minted();
+                const events = await contract.queryFilter(filter, -5000);
+                const recentEvents = events.reverse().slice(0, 10);
+
+                if (recentEvents.length === 0) {
+                    feedElement.innerHTML = "<p style='color:#555;font-size:0.85rem;grid-column:1/-1'>No recent public mints detected.</p>";
+                    return;
+                }
+
+                feedElement.innerHTML = recentEvents.map(event => {
+                    const id = event.args.tokenId.toString();
+                    const name = event.args.name;
+                    return (
+                        `<div class="nft-card" style="border-color: #3b82f6;">` +
+                        `  <div class="nft-id" style="color: #3b82f6;">#${id}</div>` +
+                        `  <div class="nft-name">${name}</div>` +
+                        `  <div class="nft-date">Global Mint</div>` +
+                        `</div>`
+                    );
+                }).join("");
+            } catch (err) { console.error(err); }
+        }
+
+        async function mintNFT() {
+            const name = document.getElementById("nftName").value.trim();
+            if (!name)     { setStatus("Enter any NFT name you like.", "err"); return; }
+            if (!contract) { setStatus("Connect your wallet first.", "err"); return; }
+            try {
+                setStatus("Waiting for wallet confirmation", "ok");
+                const pricing = await contract.mintPrice();
+                const tx = await contract.mint(name, { value: pricing });
+                setStatus("Minting transaction submitted ; now waiting for block confirmation.", "ok");
+                await tx.wait();
+                setStatus(`Your NFT has been successfully minted!`, "ok");
+                document.getElementById("nftName").value = ""; 
+                await loadData(); 
+            } catch (err) {
+                console.error(err);
+                setStatus(err.reason || err.message || "User denied transaction signing.", "err");
+            }
+        }
+
+        async function withdrawFunds() {
+            try {
+                setStatus("Initiating withdrawal", "ok");
+                const tx = await contract.withdraw();
+                await tx.wait();
+                setStatus("Funds have been withdrawn successfully!", "ok");
+                await loadData();
+            } catch (err) { setStatus(err.message, "err"); }
+        }
+
+        async function transferNFT() {
+            const to = document.getElementById("transferTo").value.trim();
+            const id = document.getElementById("transferId").value.trim();
+            if (!to || !id) { setStatus("Fill out all transfer fields.", "err"); return; }
+            try {
+                setStatus("Confirming transfer in wallet", "ok");
+                const tx = await contract.transferFrom(userAddress, to, id);
+                await tx.wait();
+                setStatus(`Token #${id} successfully sent to ${to}!`, "ok");
+                await loadData();
+            } catch (err) { setStatus(err.message, "err"); }
+        }
+
+        function setStatus(msg, type) {
+            const el = document.getElementById("status");
+            el.textContent = msg;
+            el.className   = type;
+        }
+
+        
+    </script>
+</body>
+</html>
